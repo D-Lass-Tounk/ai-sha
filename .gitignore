@@ -1,0 +1,19 @@
+# Ignorer les environnements virtuels
+venv/
+
+# Ignorer les fichiers compilés Python
+__pycache__/
+*.pyc
+
+# Ignorer les fichiers temporaires ou logs
+*.log
+*.tmp
+
+# Ignorer les fichiers audio personnels
+*.wav
+
+# Ignorer les visages inconnus détectés
+unknown/
+
+# Ignorer les fichiers d'environnement
+.env
