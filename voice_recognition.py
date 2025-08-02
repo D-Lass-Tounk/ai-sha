@@ -1,65 +1,100 @@
-# voice_recognition.py
-
+import time
 import os
-import pveagle
-from pvrecorder import PvRecorder
+import numpy as np
+from resemblyzer import VoiceEncoder, preprocess_wav
+import sounddevice as sd
+import scipy.io.wavfile as wavfile
+import speech_recognition as sr
 
-access_key = "uk+w3OfU8V1PdTqYW92pp1KbpXVCQ6lybyoLmNFt0v7mteaVRthsAQ=="
-profiles_dir = "./profiles"
+def record_audio(duration=2, fs=16000):
+    print(f"Enregistrement audio {duration}s... Parlez maintenant.")
+    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    sd.wait()
+    return recording.squeeze()
 
-def main_voice():
-    speaker_profiles = []
-    profile_names = []
-
-    for filename in os.listdir(profiles_dir):
-        if filename.endswith(".eagle"):
-            profile_path = os.path.join(profiles_dir, filename)
-            with open(profile_path, "rb") as f:
-                profile_bytes = f.read()
-            profile = pveagle.EagleProfile.from_bytes(profile_bytes)
-            speaker_profiles.append(profile)
-            profile_names.append(os.path.splitext(filename)[0])
-
+def transcribe_audio(audio, fs=16000):
+    # Sauvegarde temporaire
+    tmp_filename = "temp_audio.wav"
+    wavfile.write(tmp_filename, fs, audio)
+    r = sr.Recognizer()
+    with sr.AudioFile(tmp_filename) as source:
+        audio_data = r.record(source)
     try:
-        eagle = pveagle.create_recognizer(
-            access_key=access_key,
-            speaker_profiles=speaker_profiles
-        )
-    except pveagle.EagleError as e:
-        print(f"❌ Impossible de créer le moteur Eagle : {e}")
-        return
+        text = r.recognize_google(audio_data, language="fr-FR")  # Ou 'en-US' selon ta langue
+        return text
+    except sr.UnknownValueError:
+        return ""
+    except Exception as e:
+        print(f"Erreur transcription : {e}")
+        return ""
 
-    DEFAULT_DEVICE_INDEX = -1
-    recorder = PvRecorder(
-        device_index=DEFAULT_DEVICE_INDEX,
-        frame_length=eagle.frame_length
-    )
+def load_profiles(profiles_folder="profiles"):
+    encoder = VoiceEncoder()
+    profiles = {}
+    for fn in os.listdir(profiles_folder):
+        if fn.endswith(".wav"):
+            path = os.path.join(profiles_folder, fn)
+            wav = preprocess_wav(path)
+            embed = encoder.embed_utterance(wav)
+            name = os.path.splitext(fn)[0]
+            profiles[name] = embed
+            print(f"Profil chargé : {name}")
+    return profiles
 
-    THRESHOLD = 0.1
-    print("🎧 Démarrage reconnaissance vocale...")
+def recognize_speaker(profiles, audio, encoder, threshold=0.6):
+    embedding = encoder.embed_utterance(audio)
+    distances = {
+        name: np.dot(embedding, embed) / (np.linalg.norm(embedding) * np.linalg.norm(embed))
+        for name, embed in profiles.items()
+    }
+    if not distances:
+        return None, 0
+    best_match = max(distances, key=distances.get)
+    score = distances[best_match]
+    if score > threshold:
+        return best_match, score
+    else:
+        return None, score
 
-    recorder.start()
-    try:
-        while True:
-            audio_frame = recorder.read()
+def run_voice_loop(change_mode_callback, authorized_profile="toi", threshold=0.6):
+    profiles = load_profiles()
+    encoder = VoiceEncoder()
+    cooldown_seconds = 5
+    last_recognized = None
+    last_time = 0
+
+    print("Reconnaissance vocale démarrée. Parlez...")
+
+    while True:
+        now = time.time()
+        audio_raw = record_audio(duration=2)
+        text = transcribe_audio(audio_raw)
+        print(f"Transcription : '{text}'")
+
+        if now - last_time > cooldown_seconds:
             try:
-                scores = eagle.process(audio_frame)
-            except pveagle.EagleActivationError as e:
-                print(f"⚠️ Erreur Eagle : {e}")
-                break
+                # Reconnaissance par Resemblyzer
+                wav_preprocessed = preprocess_wav(audio_raw)
+                result, score = recognize_speaker(profiles, wav_preprocessed, encoder, threshold)
+                if result and result != last_recognized:
+                    print(f"Voix reconnue: {result} (score: {score:.3f})")
+                    if result == authorized_profile:
+                        print(f"[Vocal] Voix autorisée détectée : {result}. Changement de mode activé.")
+                        change_mode_callback("visiteur")
+                    else:
+                        print(f"[Vocal] Voix non autorisée: {result}. Pas de changement de mode.")
+                    last_recognized = result
+                elif not result:
+                    print(f"Voix inconnue ou score insuffisant ({score:.3f})")
+                    last_recognized = None
+            except Exception as e:
+                print(f"Erreur reconnaissance vocale avancée : {e}")
+            last_time = now
 
-            max_score = max(scores)
-            max_index = scores.index(max_score)
-            if max_score >= THRESHOLD:
-                print(f"Profil reconnu : {profile_names[max_index]} (score: {max_score:.4f})")
-            else:
-                print("Aucun profil reconnu (voix inconnue ou silence)")
-    except KeyboardInterrupt:
-        print("🛑 Reconnaissance vocale arrêtée par l'utilisateur.")
-    finally:
-        recorder.stop()
-        recorder.delete()
-        eagle.delete()
+        time.sleep(0.1)
 
 if __name__ == "__main__":
-    main_voice()
+    def dummy_mode_change(mode):
+        print(f"=== Mode demandé: {mode} ===")
+
+    run_voice_loop(dummy_mode_change)
